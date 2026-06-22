@@ -32,13 +32,24 @@ PORT=8788 \
 PAPER_BANKROLL=1000 \
 MAX_STAKE=50 \
 MAX_END_HOURS=24 \
+AUTO_PAPER=true \
+AUTO_MAX_OPEN=3 \
+AUTO_MAX_PER_SCAN=1 \
+AUTO_MIN_END_MINUTES=3 \
+AUTO_MAX_END_MINUTES=180 \
+AUTO_MIN_WIN_LOSS_RATIO=1.15 \
+AUTO_MAX_LOSS_PCT=0.25 \
 HEDGE_MIN_COST=1.00 \
 HEDGE_MAX_COST=1.05 \
 MIN_NET_CASH=100 \
 MIN_TRADE_EDGE=1 \
+MARKETS_LIMIT=1000 \
+SCOUT_MARKETS=30 \
 SCAN_INTERVAL_MS=12000 \
 npm start
 ```
+
+`AUTO_PAPER=true` opens paper positions automatically only when the setup is inside the ending-time window and passes the loss/profit guardrails. It is still simulated paper execution, not real orders.
 
 ## Files
 
