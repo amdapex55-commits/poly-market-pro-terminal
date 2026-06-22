@@ -16,17 +16,24 @@ const cfg = {
   paperBankroll: numberEnv("PAPER_BANKROLL", 1000),
   maxStake: numberEnv("MAX_STAKE", 50),
   maxEndHours: numberEnv("MAX_END_HOURS", 24),
+  autoPaper: boolEnv("AUTO_PAPER", true),
+  autoMaxOpen: numberEnv("AUTO_MAX_OPEN", 3),
+  autoMaxPerScan: numberEnv("AUTO_MAX_PER_SCAN", 1),
+  autoMinEndMinutes: numberEnv("AUTO_MIN_END_MINUTES", 3),
+  autoMaxEndMinutes: numberEnv("AUTO_MAX_END_MINUTES", 180),
+  autoMinWinLossRatio: numberEnv("AUTO_MIN_WIN_LOSS_RATIO", 1.15),
+  autoMaxLossPct: numberEnv("AUTO_MAX_LOSS_PCT", 0.25),
   hedgeMinCost: numberEnv("HEDGE_MIN_COST", 1.0),
   hedgeMaxCost: numberEnv("HEDGE_MAX_COST", 1.05),
   minNetCash: numberEnv("MIN_NET_CASH", 100),
   minTradeEdge: numberEnv("MIN_TRADE_EDGE", 1),
   scanIntervalMs: numberEnv("SCAN_INTERVAL_MS", 12000),
-  marketsLimit: numberEnv("MARKETS_LIMIT", 500),
+  marketsLimit: numberEnv("MARKETS_LIMIT", 1000),
   pageSize: numberEnv("PAGE_SIZE", 100),
   booksChunk: numberEnv("BOOKS_CHUNK", 100),
   walletLookbackSec: numberEnv("WALLET_LOOKBACK_SEC", 900),
   walletsPerMarket: numberEnv("WALLETS_PER_MARKET", 250),
-  scoutMarkets: numberEnv("SCOUT_MARKETS", 12),
+  scoutMarkets: numberEnv("SCOUT_MARKETS", 30),
   cooldownMin: numberEnv("COOLDOWN_MIN", 20),
 };
 
@@ -98,6 +105,7 @@ async function scanOnce() {
     await updateWalletProfiles(markets.slice(0, cfg.scoutMarkets));
     markPaperPositions(markets);
     runtime.signals = buildSignals(markets).slice(0, 30);
+    autoExecutePaper();
     runtime.trades = readRecentTrades();
     runtime.cycle += 1;
     runtime.lastScanAt = new Date().toISOString();
@@ -368,6 +376,34 @@ function openSignal(signal, action) {
   return { ok: true, position };
 }
 
+function autoExecutePaper() {
+  if (!cfg.autoPaper) return;
+  const openCount = paper.positions.filter((p) => p.status === "OPEN").length;
+  let slots = Math.max(0, cfg.autoMaxOpen - openCount);
+  let opened = 0;
+  if (!slots || paper.cash < 1) return;
+  for (const signal of runtime.signals) {
+    if (opened >= cfg.autoMaxPerScan || slots <= 0 || paper.cash < 1) break;
+    if (!autoEligible(signal)) continue;
+    const result = openSignal(signal, "AUTO_OPEN");
+    if (result.ok) {
+      opened += 1;
+      slots -= 1;
+    }
+  }
+}
+
+function autoEligible(signal) {
+  if (!signal || signal.alreadyOpen || signal.coolingDown) return false;
+  if (!Number.isFinite(signal.minutesToEnd)) return false;
+  if (signal.minutesToEnd < cfg.autoMinEndMinutes) return false;
+  if (signal.minutesToEnd > cfg.autoMaxEndMinutes) return false;
+  if (!signal.plan || signal.plan.totalStake > paper.cash) return false;
+  if (signal.plan.winProfit / Math.max(0.01, signal.plan.loseLoss) < cfg.autoMinWinLossRatio) return false;
+  if (signal.plan.loseLoss / Math.max(0.01, signal.plan.totalStake) > cfg.autoMaxLossPct) return false;
+  return true;
+}
+
 function closeManual(input) {
   const p = paper.positions.find((x) => x.id === input.id && x.status === "OPEN");
   if (!p) return { ok: false, error: "Open position not found." };
@@ -476,6 +512,8 @@ function statusPayload() {
       elapsedMs: runtime.elapsedMs,
       marketCount: runtime.markets.length,
       errors: runtime.errors.slice(0, 5),
+      autoPaper: cfg.autoPaper,
+      autoWindow: `${cfg.autoMinEndMinutes}-${cfg.autoMaxEndMinutes}m`,
     },
     paper: {
       startingBankroll: paper.startingBankroll,
@@ -566,7 +604,7 @@ button{background:#142235;color:var(--text);border:1px solid #36506c;border-radi
 </style>
 </head>
 <body>
-<header><h1>POLYMARKET PRO TERMINAL :: PAPER EXECUTION</h1><div><button onclick="scanNow()">Scan Now</button> <button class="primary" onclick="openBest()">Open Best Paper</button></div></header>
+<header><h1>POLYMARKET PRO TERMINAL :: PAPER EXECUTION</h1><div><span id="auto" class="pill">AUTO</span> <button onclick="scanNow()">Scan Now</button> <button class="primary" onclick="openBest()">Open Best Paper</button></div></header>
 <section class="grid">
 <div class="card"><div class="label">Equity</div><div id="equity" class="value">$0.00</div></div>
 <div class="card"><div class="label">PnL</div><div id="pnl" class="value">$0.00</div></div>
@@ -589,10 +627,12 @@ async function refresh(){
  pnl.textContent=money(s.paper.pnl); pnl.className='value '+(s.paper.pnl>=0?'green':'red');
  cash.textContent=money(s.paper.cash)+' / '+s.paper.open;
  scan.textContent=s.runtime.marketCount+' mkts';
+ auto.textContent=(s.runtime.autoPaper?'AUTO ON ':'AUTO OFF ') + s.runtime.autoWindow;
+ auto.className='pill '+(s.runtime.autoPaper?'green':'muted');
  signals.innerHTML=s.signals.slice(0,20).map(x=>'<tr><td class="market">'+esc(x.market)+'<div class="muted">'+esc(x.reason)+'</div></td><td>'+esc(x.biasLeg.outcome)+' / '+esc(x.hedgeLeg.outcome)+'</td><td class="nowrap">'+(x.combinedCost*100).toFixed(1)+'c</td><td>'+money(x.plan.totalStake)+'</td><td><span class="green">'+money(x.plan.winProfit)+'</span><br><span class="red">-'+money(x.plan.loseLoss).slice(1)+'</span></td><td><button class="small" onclick="openSignal(\\''+x.key+'\\')" '+(x.alreadyOpen||x.coolingDown?'disabled':'')+'>Paper Open</button></td></tr>').join('')||'<tr><td colspan="6" class="muted">No eligible signals.</td></tr>';
  positions.innerHTML=s.paper.positions.map(p=>'<tr><td class="market">'+esc(p.market)+'<div class="muted">'+esc(p.biasOutcome)+' / '+esc(p.hedgeOutcome)+'</div></td><td><span class="pill">'+esc(p.status)+'</span></td><td>'+money(p.stake)+'</td><td class="'+((p.unrealized||0)>=0?'green':'red')+'">'+money(p.unrealized)+'</td><td>'+positionButtons(p)+'</td></tr>').join('')||'<tr><td colspan="5" class="muted">No positions.</td></tr>';
  tape.innerHTML=s.trades.map(t=>'<tr><td class="nowrap">'+esc((t.ts||'').slice(11,19))+'</td><td>'+esc(t.action)+'</td><td class="market">'+esc(t.market||'')+'</td><td>'+money(t.paperCash)+'</td></tr>').join('')||'<tr><td colspan="4" class="muted">No tape.</td></tr>';
- system.innerHTML='<div>Cycle: <b>'+s.runtime.cycle+'</b></div><div>Last scan: <b>'+esc(s.runtime.lastScanAt||'-')+'</b></div><div>Next: <b>'+esc(s.runtime.nextScanAt||'-')+'</b></div><div>Open expired needing settlement: <b>'+s.paper.expired+'</b></div><pre class="red">'+esc((s.runtime.errors||[]).join('\\n'))+'</pre>';
+ system.innerHTML='<div>Cycle: <b>'+s.runtime.cycle+'</b></div><div>Auto paper: <b>'+(s.runtime.autoPaper?'ON':'OFF')+'</b> | window <b>'+esc(s.runtime.autoWindow)+'</b></div><div>Last scan: <b>'+esc(s.runtime.lastScanAt||'-')+'</b></div><div>Next: <b>'+esc(s.runtime.nextScanAt||'-')+'</b></div><div>Open expired needing settlement: <b>'+s.paper.expired+'</b></div><pre class="red">'+esc((s.runtime.errors||[]).join('\\n'))+'</pre>';
 }
 function positionButtons(p){if(p.status==='OPEN')return '<button class="small" onclick="closePos(\\''+p.id+'\\')">Close Mark</button> '+settleButtons(p); if(p.status==='EXPIRED')return settleButtons(p); return ''}
 function settleButtons(p){return (p.legs||[]).map(l=>'<button class="small" onclick="settlePos(\\''+p.id+'\\',\\''+escAttr(l.outcome)+'\\')">Settle '+esc(l.outcome)+'</button>').join(' ')}
@@ -669,6 +709,11 @@ function finite(value) {
 
 function numberEnv(name, fallback) {
   return Number.isFinite(Number(process.env[name])) ? Number(process.env[name]) : fallback;
+}
+
+function boolEnv(name, fallback) {
+  if (process.env[name] == null) return fallback;
+  return !["0", "false", "off", "no"].includes(String(process.env[name]).toLowerCase());
 }
 
 function ensureDir(dir) {
